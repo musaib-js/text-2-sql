@@ -6,3 +6,4 @@ spacy
 numpy
 python-dotenv
 openai
+cryptography

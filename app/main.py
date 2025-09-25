@@ -7,6 +7,8 @@ import psycopg2
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from pii_masking import PIIMasker
+from cryptography.fernet import Fernet
 
 load_dotenv()
 
@@ -131,11 +133,30 @@ def ask(req: QueryRequest):
         ],
     }
     
-    print("Structured intent:", structured)
+    print("Structured intent:", structured) 
+    
+    # --- PII Masking ---
+    
+    # Step 1 --> Mask the query
 
+    pii_masker = PIIMasker(nlp, secret_key=os.getenv("FERNET_KEY", Fernet.generate_key().decode()))
+    
+    masked_query = pii_masker.mask(query)
+    
+    print("Masked query:", masked_query)
+    
+    
+    # Step 2 --> Mask the structured intent
+    for filter in structured["filters"]:
+        original = filter["entity"]
+        masked = pii_masker.mask(original)
+        filter["entity"] = masked
+        
+    print("Masked structured intent:", structured)
+    
     system_prompt = f"""
     You are an expert SQL generator.
-    User query: "{query}"
+    User query: "{masked_query}"
     Relevant schema: {pruned_schema}
     Structured intent: {structured}
 
@@ -148,17 +169,25 @@ def ask(req: QueryRequest):
         model="gpt-5-mini",
         input=system_prompt,
     ).output_text.strip()
+    
+    print("Generated SQL (masked):", sql)
+    
+    # Step 3 --> Unmask the SQL
+    unmasked_sql = pii_masker.unmask(sql)
+    
+    print("Unmasked SQL:", unmasked_sql)
 
 
     rows = []
     
+    db_conn.autocommit = True  # for read-only workloads
+
     try:
-        cursor = db_conn.cursor()
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        cursor.close()
+        with db_conn.cursor() as cursor:
+            cursor.execute(unmasked_sql)
+            rows = cursor.fetchall()
     except Exception as e:
         print("SQL Execution Error:", e)
         rows = []
 
-    return {"sql": sql, "result": rows}
+    return {"sql": unmasked_sql, "result": rows, "masked_sql": sql}
